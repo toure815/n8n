@@ -156,6 +156,12 @@
         "author": {
             "type": "integer"
         },
+        "class_list": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
         "comment_status": {
             "type": "string"
         },
@@ -169,6 +175,9 @@
                     "type": "boolean"
                 },
                 "raw": {
+                    "type": "string"
+                },
+                "rendered": {
                     "type": "string"
                 }
             }
@@ -222,9 +231,6 @@
         "meta": {
             "type": "object",
             "properties": {
-                "_acf_changed": {
-                    "type": "boolean"
-                },
                 "footnotes": {
                     "type": "string"
                 }
@@ -272,5 +278,5 @@
             "type": "string"
         }
     },
-    "version": 2
+    "version": 5
 }

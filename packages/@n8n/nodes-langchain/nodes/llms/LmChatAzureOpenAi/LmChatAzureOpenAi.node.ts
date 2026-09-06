@@ -1,4 +1,5 @@
-import { AzureChatOpenAI } from '@langchain/openai';
+import { AzureChatOpenAI, ChatOpenAI, type ClientOptions } from '@langchain/openai';
+import { getProxyAgent, makeN8nLlmFailedAttemptHandler, N8nLlmTracing } from '@n8n/ai-utilities';
 import {
 	NodeOperationError,
 	NodeConnectionTypes,
@@ -7,8 +8,6 @@ import {
 	type ISupplyDataFunctions,
 	type SupplyData,
 } from 'n8n-workflow';
-
-import { getProxyAgent } from '@utils/httpProxyAgent';
 
 import { setupApiKeyAuthentication } from './credentials/api-key';
 import { setupOAuth2Authentication } from './credentials/oauth2';
@@ -19,8 +18,6 @@ import type {
 	AzureOpenAIOAuth2ModelConfig,
 	AzureOpenAIOptions,
 } from './types';
-import { makeN8nLlmFailedAttemptHandler } from '../n8nLlmFailedAttemptHandler';
-import { N8nLlmTracing } from '../N8nLlmTracing';
 
 export class LmChatAzureOpenAi implements INodeType {
 	description: INodeTypeDescription = {
@@ -103,17 +100,62 @@ export class LmChatAzureOpenAi implements INodeType {
 
 			this.logger.info(`Instantiating AzureChatOpenAI model with deployment: ${modelName}`);
 
-			// Create and return the model
+			const timeout = options.timeout;
+
+			if (modelConfig.azureFoundryBaseURL) {
+				const foundryURL = modelConfig.azureFoundryBaseURL;
+				const configuration: ClientOptions = {
+					baseURL: foundryURL,
+					fetchOptions: {
+						dispatcher: getProxyAgent(foundryURL, {
+							headersTimeout: timeout,
+							bodyTimeout: timeout,
+						}),
+					},
+				};
+				if (modelConfig.azureADTokenProvider) {
+					configuration.apiKey = modelConfig.azureADTokenProvider;
+				}
+				const model = new ChatOpenAI({
+					model: modelName,
+					...(modelConfig.azureOpenAIApiKey ? { apiKey: modelConfig.azureOpenAIApiKey } : {}),
+					...options,
+					timeout,
+					maxRetries: options.maxRetries ?? 2,
+					configuration,
+					callbacks: [new N8nLlmTracing(this)],
+					modelKwargs: options.responseFormat
+						? {
+								response_format: { type: options.responseFormat },
+							}
+						: undefined,
+					onFailedAttempt: makeN8nLlmFailedAttemptHandler(this),
+				});
+
+				this.logger.info(`Azure OpenAI (Foundry) client initialized for model: ${modelName}`);
+				return { response: model };
+			}
+
 			const model = new AzureChatOpenAI({
+				// Force completions API — Azure's SDK doesn't rewrite the /responses path,
+				// so the Responses API hits an invalid endpoint and causes a connection error.
+				// See: https://github.com/langchain-ai/langchainjs/issues/9038
+				useResponsesApi: false,
+				// Model name is required so logs are correct
+				// Also ensures internal logic (like mapping "maxTokens" to "maxCompletionTokens") is correct
+				model: modelName,
 				azureOpenAIApiDeploymentName: modelName,
 				...modelConfig,
 				...options,
-				timeout: options.timeout ?? 60000,
+				timeout,
 				maxRetries: options.maxRetries ?? 2,
 				callbacks: [new N8nLlmTracing(this)],
 				configuration: {
 					fetchOptions: {
-						dispatcher: getProxyAgent(),
+						dispatcher: getProxyAgent(undefined, {
+							headersTimeout: timeout,
+							bodyTimeout: timeout,
+						}),
 					},
 				},
 				modelKwargs: options.responseFormat

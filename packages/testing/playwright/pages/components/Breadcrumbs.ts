@@ -1,7 +1,13 @@
 import type { Page } from '@playwright/test';
 
+import { ActionToggle } from './ActionToggle';
+
 export class Breadcrumbs {
-	constructor(private readonly page: Page) {}
+	private readonly actionToggle: ActionToggle;
+
+	constructor(private readonly page: Page) {
+		this.actionToggle = new ActionToggle(page);
+	}
 
 	getBreadcrumbs() {
 		return this.page.getByTestId('breadcrumbs-item');
@@ -22,11 +28,21 @@ export class Breadcrumbs {
 		return this.page.getByTestId('home-project');
 	}
 
-	getHiddenBreadcrumb(resourceName: string) {
-		return this.getHiddenBreadcrumbs().filter({ hasText: resourceName });
+	getActionToggleDropdown(resourceName: string) {
+		return this.actionToggle.getAction(resourceName);
 	}
 
-	getActionToggleDropdown(resourceName: string) {
-		return this.page.getByTestId('action-toggle-dropdown').getByTestId(`action-${resourceName}`);
+	getFolderBreadcrumbsActionToggle() {
+		return this.page.getByTestId('folder-breadcrumbs-actions');
+	}
+
+	/**
+	 * Rename the current breadcrumb by activating inline edit mode
+	 * @param newName - The new name for the breadcrumb item
+	 */
+	async renameCurrentBreadcrumb(newName: string) {
+		await this.getCurrentBreadcrumb().getByTestId('inline-edit-preview').click();
+		await this.getCurrentBreadcrumb().getByTestId('inline-edit-input').fill(newName);
+		await this.page.keyboard.press('Enter');
 	}
 }

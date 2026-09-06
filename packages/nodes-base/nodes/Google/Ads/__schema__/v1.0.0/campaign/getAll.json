@@ -7,14 +7,26 @@
         "amountMicros": {
             "type": "string"
         },
+        "averageCost": {
+            "type": "number"
+        },
+        "averageCpm": {
+            "type": "number"
+        },
         "costMicros": {
             "type": "string"
+        },
+        "ctr": {
+            "type": "number"
         },
         "id": {
             "type": "string"
         },
         "impressions": {
             "type": "string"
+        },
+        "interactionRate": {
+            "type": "number"
         },
         "interactions": {
             "type": "string"
@@ -31,9 +43,12 @@
         "status": {
             "type": "string"
         },
+        "videoTrueviewViews": {
+            "type": "string"
+        },
         "videoViews": {
             "type": "string"
         }
     },
-    "version": 4
+    "version": 8
 }

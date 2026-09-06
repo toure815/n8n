@@ -7,8 +7,12 @@ import {
 	testDb,
 	mockInstance,
 } from '@n8n/backend-test-utils';
+import { Container } from '@n8n/di';
+import type { MockInstance } from 'vitest';
 
 import { FeatureNotLicensedError } from '@/errors/feature-not-licensed.error';
+import { EventService } from '@/events/event.service';
+import { ProvisioningService } from '@/modules/provisioning.ee/provisioning.service.ee';
 import { Telemetry } from '@/telemetry';
 import {
 	createMemberWithApiKey,
@@ -21,12 +25,19 @@ describe('Projects in Public API', () => {
 	const testServer = setupTestServer({ endpointGroups: ['publicApi'] });
 	mockInstance(Telemetry);
 
+	let emitSpy: MockInstance<EventService['emit']>;
+
 	beforeAll(async () => {
 		await testDb.init();
 	});
 
 	beforeEach(async () => {
 		await testDb.truncate(['Project', 'User']);
+		emitSpy = vi.spyOn(Container.get(EventService), 'emit');
+	});
+
+	afterEach(() => {
+		emitSpy.mockRestore();
 	});
 
 	describe('GET /projects', () => {
@@ -143,7 +154,9 @@ describe('Projects in Public API', () => {
 				name: 'some-project',
 				icon: null,
 				type: 'team',
+				creatorId: owner.id,
 				description: null,
+				customTelemetryTags: [],
 				id: expect.any(String),
 				createdAt: expect.any(String),
 				updatedAt: expect.any(String),
@@ -151,6 +164,11 @@ describe('Projects in Public API', () => {
 				scopes: expect.any(Array),
 			});
 			await expect(getProjectByNameOrFail(projectPayload.name)).resolves.not.toThrow();
+			expect(emitSpy).toHaveBeenCalledWith('team-project-created', {
+				userId: owner.id,
+				role: owner.role.slug,
+				uiContext: undefined,
+			});
 		});
 
 		it('if not authenticated, should reject', async () => {
@@ -244,6 +262,13 @@ describe('Projects in Public API', () => {
 			 */
 			expect(response.status).toBe(204);
 			await expect(getProjectByNameOrFail(project.id)).rejects.toThrow();
+			expect(emitSpy).toHaveBeenCalledWith('team-project-deleted', {
+				userId: owner.id,
+				role: owner.role.slug,
+				projectId: project.id,
+				removalType: 'delete',
+				targetProjectId: undefined,
+			});
 		});
 
 		it('if not authenticated, should reject', async () => {
@@ -333,6 +358,11 @@ describe('Projects in Public API', () => {
 			 */
 			expect(response.status).toBe(204);
 			await expect(getProjectByNameOrFail('new-name')).resolves.not.toThrow();
+			expect(emitSpy).toHaveBeenCalledWith('team-project-updated', {
+				userId: owner.id,
+				role: owner.role.slug,
+				projectId: project.id,
+			});
 		});
 
 		it('if not authenticated, should reject', async () => {
@@ -403,6 +433,167 @@ describe('Projects in Public API', () => {
 			 */
 			expect(response.status).toBe(403);
 			expect(response.body).toHaveProperty('message', 'Forbidden');
+		});
+	});
+
+	describe('GET /projects/:id/users', () => {
+		it('if licensed, should return project members with pagination', async () => {
+			/**
+			 * Arrange
+			 */
+			testServer.license.setQuota('quota:maxTeamProjects', -1);
+			testServer.license.enable('feat:projectRole:admin');
+			testServer.license.enable('feat:projectRole:viewer');
+			testServer.license.enable('feat:projectRole:editor');
+			const owner = await createOwnerWithApiKey();
+			const project = await createTeamProject('shared-project', owner);
+			const member1 = await createMember();
+			const member2 = await createMember();
+			await linkUserToProject(member1, project, 'project:viewer');
+			await linkUserToProject(member2, project, 'project:editor');
+
+			/**
+			 * Act
+			 */
+			const response = await testServer
+				.publicApiAgentFor(owner)
+				.get(`/projects/${project.id}/users`);
+
+			/**
+			 * Assert
+			 */
+			expect(response.status).toBe(200);
+			expect(response.body).toHaveProperty('data');
+			expect(response.body).toHaveProperty('nextCursor');
+			expect(Array.isArray(response.body.data)).toBe(true);
+			expect(response.body.data.length).toBe(3); // owner (admin) + member1 + member2
+
+			const memberIds = new Set(response.body.data.map((m: { id: string }) => m.id));
+			expect(memberIds).toContain(owner.id);
+			expect(memberIds).toContain(member1.id);
+			expect(memberIds).toContain(member2.id);
+
+			for (const row of response.body.data) {
+				expect(row).toHaveProperty('id');
+				expect(row).toHaveProperty('email');
+				expect(row).toHaveProperty('firstName');
+				expect(row).toHaveProperty('lastName');
+				expect(row).toHaveProperty('createdAt');
+				expect(row).toHaveProperty('updatedAt');
+				expect(row).toHaveProperty('role');
+			}
+
+			const adminRow = response.body.data.find((m: { id: string }) => m.id === owner.id);
+			expect(adminRow.role).toBe('project:admin');
+			const viewerRow = response.body.data.find((m: { id: string }) => m.id === member1.id);
+			expect(viewerRow.role).toBe('project:viewer');
+			const editorRow = response.body.data.find((m: { id: string }) => m.id === member2.id);
+			expect(editorRow.role).toBe('project:editor');
+		});
+
+		it('if licensed, should respect limit and cursor for pagination', async () => {
+			/**
+			 * Arrange
+			 */
+			testServer.license.setQuota('quota:maxTeamProjects', -1);
+			testServer.license.enable('feat:projectRole:admin');
+			testServer.license.enable('feat:projectRole:viewer');
+			testServer.license.enable('feat:projectRole:editor');
+			const owner = await createOwnerWithApiKey();
+			const project = await createTeamProject('shared-project', owner);
+			const member1 = await createMember();
+			const member2 = await createMember();
+			await linkUserToProject(member1, project, 'project:viewer');
+			await linkUserToProject(member2, project, 'project:editor');
+
+			/**
+			 * Act – first page
+			 */
+			const first = await testServer
+				.publicApiAgentFor(owner)
+				.get(`/projects/${project.id}/users`)
+				.query({ limit: 2 });
+
+			/**
+			 * Assert first page
+			 */
+			expect(first.status).toBe(200);
+			expect(first.body.data.length).toBe(2);
+			expect(first.body.nextCursor).toBeDefined();
+
+			/**
+			 * Act – second page
+			 */
+			const second = await testServer
+				.publicApiAgentFor(owner)
+				.get(`/projects/${project.id}/users`)
+				.query({ limit: 2, cursor: first.body.nextCursor });
+
+			/**
+			 * Assert second page
+			 */
+			expect(second.status).toBe(200);
+			expect(second.body.data.length).toBe(1);
+			const allIds = [
+				...first.body.data.map((m: { id: string }) => m.id),
+				...second.body.data.map((m: { id: string }) => m.id),
+			];
+			expect(new Set(allIds).size).toBe(3);
+		});
+
+		it('if not authenticated, should reject', async () => {
+			const project = await createTeamProject();
+
+			const response = await testServer
+				.publicApiAgentWithoutApiKey()
+				.get(`/projects/${project.id}/users`);
+
+			expect(response.status).toBe(401);
+			expect(response.body).toHaveProperty('message', "'X-N8N-API-KEY' header required");
+		});
+
+		it('if not licensed, should reject', async () => {
+			const owner = await createOwnerWithApiKey();
+			const project = await createTeamProject();
+
+			const response = await testServer
+				.publicApiAgentFor(owner)
+				.get(`/projects/${project.id}/users`);
+
+			expect(response.status).toBe(403);
+			expect(response.body).toHaveProperty(
+				'message',
+				new FeatureNotLicensedError('feat:projectRole:admin').message,
+			);
+		});
+
+		it('if project not found, should reject with 404', async () => {
+			testServer.license.setQuota('quota:maxTeamProjects', -1);
+			testServer.license.enable('feat:projectRole:admin');
+			const owner = await createOwnerWithApiKey();
+
+			const response = await testServer.publicApiAgentFor(owner).get('/projects/123456/users');
+
+			expect(response.status).toBe(404);
+			expect(response.body).toHaveProperty('message', 'Could not find project with ID "123456"');
+		});
+
+		it('if user has no access to project, should reject with 404', async () => {
+			testServer.license.setQuota('quota:maxTeamProjects', -1);
+			testServer.license.enable('feat:projectRole:admin');
+			const owner = await createOwnerWithApiKey();
+			const member = await createMemberWithApiKey({ scopes: ['user:list'] });
+			const project = await createTeamProject('other-owner-project', owner);
+
+			const response = await testServer
+				.publicApiAgentFor(member)
+				.get(`/projects/${project.id}/users`);
+
+			expect(response.status).toBe(404);
+			expect(response.body).toHaveProperty(
+				'message',
+				`Could not find project with ID "${project.id}"`,
+			);
 		});
 	});
 
@@ -628,6 +819,36 @@ describe('Projects in Public API', () => {
 					'Your instance is not licensed to use role "project:viewer".',
 				);
 			});
+
+			describe('when project roles are managed', () => {
+				let managedSpy: MockInstance;
+				beforeEach(() => {
+					managedSpy = vi
+						.spyOn(Container.get(ProvisioningService), 'isProjectRoleManaged')
+						.mockResolvedValue(true);
+				});
+				afterEach(() => managedSpy.mockRestore());
+
+				it('returns 403 and leaves membership unchanged', async () => {
+					const owner = await createOwnerWithApiKey();
+					const project = await createTeamProject('shared-project', owner);
+					const member = await createMember();
+					const before = await getAllProjectRelations({ projectId: project.id });
+
+					const response = await testServer
+						.publicApiAgentFor(owner)
+						.post(`/projects/${project.id}/users`)
+						.send({ relations: [{ userId: member.id, role: 'project:viewer' }] });
+
+					expect(response.status).toBe(403);
+					expect(response.body).toHaveProperty(
+						'message',
+						'Project roles are managed automatically and cannot be changed manually',
+					);
+					const after = await getAllProjectRelations({ projectId: project.id });
+					expect(after.length).toEqual(before.length);
+				});
+			});
 		});
 	});
 
@@ -749,6 +970,35 @@ describe('Projects in Public API', () => {
 					`Could not find project with ID: ${project.id}`,
 				);
 			});
+
+			describe('when project roles are managed', () => {
+				let managedSpy: MockInstance;
+				beforeEach(() => {
+					managedSpy = vi
+						.spyOn(Container.get(ProvisioningService), 'isProjectRoleManaged')
+						.mockResolvedValue(true);
+				});
+				afterEach(() => managedSpy.mockRestore());
+
+				it('returns 403 and leaves the role unchanged', async () => {
+					const owner = await createOwnerWithApiKey();
+					const project = await createTeamProject('shared-project', owner);
+					const member = await createMember();
+					await linkUserToProject(member, project, 'project:viewer');
+
+					const response = await testServer
+						.publicApiAgentFor(owner)
+						.patch(`/projects/${project.id}/users/${member.id}`)
+						.send({ role: 'project:editor' });
+
+					expect(response.status).toBe(403);
+					expect(response.body).toHaveProperty(
+						'message',
+						'Project roles are managed automatically and cannot be changed manually',
+					);
+					expect(await getProjectRoleForUser(project.id, member.id)).toBe('project:viewer');
+				});
+			});
 		});
 	});
 
@@ -865,6 +1115,36 @@ describe('Projects in Public API', () => {
 
 				expect(projectAfter.length).toEqual(1);
 				expect(projectAfter[0].userId).toEqual(owner.id);
+			});
+
+			describe('when project roles are managed', () => {
+				let managedSpy: MockInstance;
+				beforeEach(() => {
+					managedSpy = vi
+						.spyOn(Container.get(ProvisioningService), 'isProjectRoleManaged')
+						.mockResolvedValue(true);
+				});
+				afterEach(() => managedSpy.mockRestore());
+
+				it('returns 403 and leaves membership unchanged', async () => {
+					const owner = await createOwnerWithApiKey();
+					const project = await createTeamProject('shared-project', owner);
+					const member = await createMember();
+					await linkUserToProject(member, project, 'project:viewer');
+					const before = await getAllProjectRelations({ projectId: project.id });
+
+					const response = await testServer
+						.publicApiAgentFor(owner)
+						.delete(`/projects/${project.id}/users/${member.id}`);
+
+					expect(response.status).toBe(403);
+					expect(response.body).toHaveProperty(
+						'message',
+						'Project roles are managed automatically and cannot be changed manually',
+					);
+					const after = await getAllProjectRelations({ projectId: project.id });
+					expect(after.length).toEqual(before.length);
+				});
 			});
 		});
 	});

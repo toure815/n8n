@@ -1,15 +1,19 @@
-import { ESLintUtils } from '@typescript-eslint/utils';
+import type { ReportSuggestionArray } from '@typescript-eslint/utils/ts-eslint';
+
 import {
 	isNodeTypeClass,
-	findClassProperty,
+	findNodeDescriptionObject,
 	findArrayLiteralProperty,
 	extractCredentialNameFromArray,
 	findPackageJson,
 	readPackageJsonCredentials,
 	isFileType,
+	findSimilarStrings,
+	createRule,
 } from '../utils/index.js';
 
-export const NoCredentialReuseRule = ESLintUtils.RuleCreator.withoutDocs({
+export const NoCredentialReuseRule = createRule({
+	name: 'no-credential-reuse',
 	meta: {
 		type: 'problem',
 		docs: {
@@ -17,10 +21,13 @@ export const NoCredentialReuseRule = ESLintUtils.RuleCreator.withoutDocs({
 				'Prevent credential re-use security issues by ensuring nodes only reference credentials from the same package',
 		},
 		messages: {
+			didYouMean: "Did you mean '{{ suggestedName }}'?",
+			useAvailable: "Use available credential '{{ suggestedName }}'",
 			credentialNotInPackage:
 				'SECURITY: Node references credential "{{ credentialName }}" which is not defined in this package. This creates a security risk as it attempts to reuse credentials from other packages. Nodes can only use credentials from the same package as listed in package.json n8n.credentials field.',
 		},
 		schema: [],
+		hasSuggestions: true,
 	},
 	defaultOptions: [],
 	create(context) {
@@ -51,12 +58,12 @@ export const NoCredentialReuseRule = ESLintUtils.RuleCreator.withoutDocs({
 					return;
 				}
 
-				const descriptionProperty = findClassProperty(node, 'description');
-				if (!descriptionProperty?.value || descriptionProperty.value.type !== 'ObjectExpression') {
+				const description = findNodeDescriptionObject(node);
+				if (!description) {
 					return;
 				}
 
-				const credentialsArray = findArrayLiteralProperty(descriptionProperty.value, 'credentials');
+				const credentialsArray = findArrayLiteralProperty(description, 'credentials');
 				if (!credentialsArray) {
 					return;
 				}
@@ -66,12 +73,41 @@ export const NoCredentialReuseRule = ESLintUtils.RuleCreator.withoutDocs({
 				credentialsArray.elements.forEach((element) => {
 					const credentialInfo = extractCredentialNameFromArray(element);
 					if (credentialInfo && !allowedCredentials.has(credentialInfo.name)) {
+						const similarCredentials = findSimilarStrings(credentialInfo.name, allowedCredentials);
+						const suggestions: ReportSuggestionArray<
+							'didYouMean' | 'useAvailable' | 'credentialNotInPackage'
+						> = [];
+
+						for (const similarName of similarCredentials) {
+							suggestions.push({
+								messageId: 'didYouMean',
+								data: { suggestedName: similarName },
+								fix(fixer) {
+									return fixer.replaceText(credentialInfo.node, `"${similarName}"`);
+								},
+							});
+						}
+
+						if (suggestions.length === 0 && allowedCredentials.size > 0) {
+							const availableCredentials = Array.from(allowedCredentials).slice(0, 3);
+							for (const availableName of availableCredentials) {
+								suggestions.push({
+									messageId: 'useAvailable',
+									data: { suggestedName: availableName },
+									fix(fixer) {
+										return fixer.replaceText(credentialInfo.node, `"${availableName}"`);
+									},
+								});
+							}
+						}
+
 						context.report({
 							node: credentialInfo.node,
 							messageId: 'credentialNotInPackage',
 							data: {
 								credentialName: credentialInfo.name,
 							},
+							suggest: suggestions,
 						});
 					}
 				});

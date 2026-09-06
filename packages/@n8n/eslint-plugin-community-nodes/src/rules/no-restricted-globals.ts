@@ -1,5 +1,7 @@
-import { ESLintUtils } from '@typescript-eslint/utils';
+import { TSESTree } from '@typescript-eslint/utils';
 import type { TSESLint } from '@typescript-eslint/utils';
+
+import { createRule } from '../utils/index.js';
 
 const restrictedGlobals = [
 	'clearInterval',
@@ -15,7 +17,14 @@ const restrictedGlobals = [
 	'__filename',
 ];
 
-export const NoRestrictedGlobalsRule = ESLintUtils.RuleCreator.withoutDocs({
+// Nudge toward the n8n-workflow alternatives that work under n8n Cloud's restrictions
+const restrictedGlobalHints: Record<string, string> = {
+	setTimeout: "Use the 'sleep' helper from 'n8n-workflow' instead.",
+	clearTimeout: "Use 'sleepWithAbort' from 'n8n-workflow' with an AbortSignal instead.",
+};
+
+export const NoRestrictedGlobalsRule = createRule({
+	name: 'no-restricted-globals',
 	meta: {
 		type: 'problem',
 		docs: {
@@ -23,6 +32,7 @@ export const NoRestrictedGlobalsRule = ESLintUtils.RuleCreator.withoutDocs({
 		},
 		messages: {
 			restrictedGlobal: "Use of restricted global '{{ name }}' is not allowed",
+			restrictedGlobalWithHint: "Use of restricted global '{{ name }}' is not allowed. {{ hint }}",
 		},
 		schema: [],
 	},
@@ -33,18 +43,28 @@ export const NoRestrictedGlobalsRule = ESLintUtils.RuleCreator.withoutDocs({
 
 			// Skip property access (like console.process - we want process.exit but not obj.process)
 			if (
-				parent?.type === 'MemberExpression' &&
+				parent?.type === TSESTree.AST_NODE_TYPES.MemberExpression &&
 				parent.property === ref.identifier &&
 				!parent.computed
 			) {
 				return;
 			}
 
-			context.report({
-				node: ref.identifier,
-				messageId: 'restrictedGlobal',
-				data: { name },
-			});
+			const hint = restrictedGlobalHints[name];
+
+			context.report(
+				hint
+					? {
+							node: ref.identifier,
+							messageId: 'restrictedGlobalWithHint',
+							data: { name, hint },
+						}
+					: {
+							node: ref.identifier,
+							messageId: 'restrictedGlobal',
+							data: { name },
+						},
+			);
 		}
 
 		return {

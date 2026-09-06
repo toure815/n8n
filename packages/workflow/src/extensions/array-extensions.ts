@@ -1,3 +1,10 @@
+// NOTE: This file is intentionally mirrored in @n8n/expression-runtime/src/extensions/
+// for use inside the isolated VM. Changes here must be reflected there and vice versa.
+// TODO: Eliminate the duplication. The blocker is that @n8n/expression-runtime is
+// Vite-stubbed for browser builds (to exclude isolated-vm), which prevents n8n-workflow
+// from importing these extension utilities directly from the runtime package. Fix by
+// splitting @n8n/expression-runtime into a browser-safe extensions subpath (not stubbed)
+// and a node-only VM entry (stubbed).
 import isEqual from 'lodash/isEqual';
 import uniqWith from 'lodash/uniqWith';
 
@@ -6,6 +13,23 @@ import { compact as oCompact } from './object-extensions';
 import { ExpressionExtensionError } from '../errors/expression-extension.error';
 import { ExpressionError } from '../errors/expression.error';
 import { randomInt } from '../utils';
+
+// Define an own data field rather than assigning through an inherited setter.
+function defineField(target: Record<string, unknown>, key: PropertyKey, value: unknown): void {
+	Object.defineProperty(target, key, {
+		value,
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+}
+
+// Report whether a field resolves on the object itself and not through its prototype chain.
+function hasReadableField(value: object, field: string): boolean {
+	if (Object.hasOwn(value, field)) return true;
+	const proto = Object.getPrototypeOf(value) as object | null;
+	return field in value && (proto === null || !(field in proto));
+}
 
 function first(value: unknown[]): unknown {
 	return value[0];
@@ -21,6 +45,16 @@ function isNotEmpty(value: unknown[]): boolean {
 
 function last(value: unknown[]): unknown {
 	return value[value.length - 1];
+}
+
+// reverse() deliberately stays copy-first: it has shadowed the native for
+// years and is documented as an extension. Do NOT add other native mutator
+// names here — registry names shadow natives on every receiver the expression
+// transformer sees, including plain local arrays created inside expressions
+// (in-place mutation on lazy-proxied workflow data is handled by the proxies
+// themselves, see CAT-4266).
+function reverse(value: unknown[]): unknown[] {
+	return [...value].reverse();
 }
 
 function pluck(value: unknown[], extraArgs: unknown[]): unknown[] {
@@ -58,7 +92,8 @@ function unique(value: unknown[], extraArgs: string[]): unknown[] {
 	const mapForEqualityCheck = (item: unknown): unknown => {
 		if (extraArgs.length > 0 && item && typeof item === 'object') {
 			return extraArgs.reduce<Record<string, unknown>>((acc, key) => {
-				acc[key] = (item as Record<string, unknown>)[key];
+				const source = item as Record<string, unknown>;
+				defineField(acc, key, hasReadableField(source, key) ? source[key] : undefined);
 				return acc;
 			}, {});
 		}
@@ -152,13 +187,16 @@ function smartJoin(value: unknown[], extraArgs: string[]): object {
 			'smartJoin(): expected two string args, e.g. .smartJoin("name", "value")',
 		);
 	}
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-return
-	return value.reduce<any>((o, v) => {
-		if (typeof v === 'object' && v !== null && keyField in v && valueField in v) {
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-explicit-any
-			o[(v as any)[keyField]] = (v as any)[valueField];
+	return value.reduce<Record<string, unknown>>((o, v) => {
+		if (
+			typeof v === 'object' &&
+			v !== null &&
+			hasReadableField(v, keyField) &&
+			hasReadableField(v, valueField)
+		) {
+			const entry = v as Record<string, unknown>;
+			defineField(o, entry[keyField] as PropertyKey, entry[valueField]);
 		}
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
 		return o;
 	}, {});
 }
@@ -187,18 +225,14 @@ function renameKeys(value: unknown[], extraArgs: string[]): unknown[] {
 		if (typeof v !== 'object' || v === null) {
 			return v;
 		}
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-explicit-any
-		const newObj = { ...(v as any) };
+		const newObj: Record<string, unknown> = { ...(v as Record<string, unknown>) };
 		const chunkedArgs = chunk(extraArgs, [2]) as string[][];
 		chunkedArgs.forEach(([from, to]) => {
-			if (from in newObj) {
-				// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-				newObj[to] = newObj[from];
-				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+			if (Object.hasOwn(newObj, from)) {
+				defineField(newObj, to, newObj[from]);
 				delete newObj[from];
 			}
 		});
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
 		return newObj;
 	});
 }
@@ -216,8 +250,8 @@ function mergeObjects(value: Record<string, unknown>, extraArgs: unknown[]): unk
 
 	const newObject = { ...value };
 	for (const [key, val] of Object.entries(other)) {
-		if (!(key in newObject)) {
-			newObject[key] = val;
+		if (!Object.hasOwn(newObject, key)) {
+			defineField(newObject, key, val);
 		}
 	}
 	return newObject;
@@ -243,14 +277,48 @@ function merge(value: unknown[], extraArgs: unknown[][]): unknown {
 		);
 	}
 	const listLength = value.length > others.length ? value.length : others.length;
-	let merged = {};
+	const merged: Record<string, unknown> = {};
 	for (let i = 0; i < listLength; i++) {
 		if (value[i] !== undefined) {
 			if (typeof value[i] === 'object' && typeof others[i] === 'object') {
-				merged = Object.assign(
-					merged,
-					mergeObjects(value[i] as Record<string, unknown>, [others[i]]),
-				);
+				const pair = mergeObjects(value[i] as Record<string, unknown>, [others[i]]) as Record<
+					string,
+					unknown
+				>;
+				for (const [key, val] of Object.entries(pair)) {
+					defineField(merged, key, val);
+				}
+			}
+		}
+	}
+	return merged;
+}
+
+function mergeIntoObject(value: unknown[], extraArgs: unknown[][]): unknown {
+	const [others] = extraArgs;
+
+	if (!Array.isArray(others)) {
+		throw new ExpressionExtensionError(
+			'mergeIntoObject(): expected array arg, e.g. .mergeIntoObject([{ id: 1, otherValue: 3 }])',
+		);
+	}
+	const listLength = value.length > others.length ? value.length : others.length;
+	const merged: Record<string, unknown> = {};
+	for (let i = 0; i < listLength; i++) {
+		const baseIsObject = value[i] !== null && typeof value[i] === 'object';
+		const otherIsObject = others[i] !== null && typeof others[i] === 'object';
+		let source: Record<string, unknown> | undefined;
+		if (baseIsObject) {
+			source = mergeObjects(
+				value[i] as Record<string, unknown>,
+				otherIsObject ? [others[i]] : [],
+			) as Record<string, unknown>;
+		} else if (otherIsObject) {
+			source = others[i] as Record<string, unknown>;
+		}
+		if (source) {
+			for (const [key, val] of Object.entries(source)) {
+				defineField(merged, key, val);
 			}
 		}
 	}
@@ -334,6 +402,7 @@ export function toDateTime() {
 
 average.doc = {
 	name: 'average',
+	aliases: ['mean'],
 	description:
 		'Returns the average of the numbers in the array. Throws an error if there are any non-numbers.',
 	examples: [{ example: '[12, 1, 5].average()', evaluated: '6' }],
@@ -343,6 +412,7 @@ average.doc = {
 
 compact.doc = {
 	name: 'compact',
+	aliases: ['removeEmpty'],
 	description:
 		'Removes any empty values from the array. <code>null</code>, <code>""</code> and <code>undefined</code> count as empty.',
 	examples: [{ example: '[2, null, 1, ""].compact()', evaluated: '[2, 1]' }],
@@ -374,6 +444,7 @@ isNotEmpty.doc = {
 
 first.doc = {
 	name: 'first',
+	aliases: ['head'],
 	description: 'Returns the first element of the array',
 	examples: [{ example: "['quick', 'brown', 'fox'].first()", evaluated: "'quick'" }],
 	returnType: 'any',
@@ -382,6 +453,7 @@ first.doc = {
 
 last.doc = {
 	name: 'last',
+	aliases: ['tail'],
 	description: 'Returns the last element of the array',
 	examples: [{ example: "['quick', 'brown', 'fox'].last()", evaluated: "'fox'" }],
 	returnType: 'any',
@@ -481,6 +553,7 @@ merge.doc = {
 	name: 'merge',
 	description:
 		'Merges two Object-arrays into one object by merging the key-value pairs of each element.',
+	hidden: true,
 	examples: [
 		{
 			example:
@@ -498,6 +571,29 @@ merge.doc = {
 		},
 	],
 	docURL: 'https://docs.n8n.io/code/builtin/data-transformation-functions/arrays/#array-merge',
+};
+
+mergeIntoObject.doc = {
+	name: 'mergeIntoObject',
+	description:
+		'Merges two Object-arrays into one object by merging the key-value pairs of each element. If the arrays have different lengths, elements from the longer array are kept.',
+	examples: [
+		{
+			example: "[{ name: 'Nathan' }, { age: 42 }].mergeIntoObject([{ city: 'Berlin' }])",
+			evaluated: "{ name: 'Nathan', age: 42, city: 'Berlin' }",
+		},
+	],
+	returnType: 'Object',
+	args: [
+		{
+			name: 'otherArray',
+			optional: false,
+			description: 'The array to merge into the base array',
+			type: 'Array',
+		},
+	],
+	docURL:
+		'https://docs.n8n.io/code/builtin/data-transformation-functions/arrays/#array-mergeintoobject',
 };
 
 pluck.doc = {
@@ -640,6 +736,7 @@ toJsonString.doc = {
 
 append.doc = {
 	name: 'append',
+	aliases: ['push'],
 	description:
 		'Adds new elements to the end of the array. Similar to <code>push()</code>, but returns the modified array. Consider using spread syntax instead (see examples).',
 	examples: [
@@ -674,6 +771,7 @@ export const arrayExtensions: ExtensionMap = {
 		unique,
 		first,
 		last,
+		reverse,
 		pluck,
 		randomItem,
 		sum,
@@ -687,6 +785,7 @@ export const arrayExtensions: ExtensionMap = {
 		chunk,
 		renameKeys,
 		merge,
+		mergeIntoObject,
 		union,
 		difference,
 		intersection,

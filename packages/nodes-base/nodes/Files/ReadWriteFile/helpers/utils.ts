@@ -1,5 +1,6 @@
 import type { IDataObject, IExecuteFunctions } from 'n8n-workflow';
 import { NodeOperationError } from 'n8n-workflow';
+import path from 'node:path';
 
 export function errorMapper(
 	this: IExecuteFunctions,
@@ -33,9 +34,25 @@ export function errorMapper(
 	return new NodeOperationError(this.getNode(), error, { itemIndex, message, description });
 }
 
-export function escapeSpecialCharacters(str: string) {
-	// Escape parentheses
-	str = str.replace(/[()]/g, '\\$&');
+const WINDOWS_DRIVE_PREFIX = /^[a-zA-Z]:/;
+// The backslash after the drive letter is always a separator; elsewhere one is a
+// separator unless it escapes a character the option governs, so forward-slash
+// selectors keep escapes. Only `()[]` qualify — the node never escapes anything
+// else, so a backslash before `{`, `}` or `!` is a separator.
+const HAS_BACKSLASH_SEPARATOR = /^[a-zA-Z]:\\|\\(?![()[\]])/;
 
-	return str;
+export function normalizeFileSelector(fileSelectorRaw: string) {
+	const fileSelector = String(fileSelectorRaw);
+
+	if (!WINDOWS_DRIVE_PREFIX.test(fileSelector)) return fileSelector;
+
+	// posix.normalize collapses `..` and `//` the same way, but leaves `\` alone
+	return HAS_BACKSLASH_SEPARATOR.test(fileSelector)
+		? path.win32.normalize(fileSelector).replace(/\\/g, '/')
+		: path.posix.normalize(fileSelector);
+}
+
+// The optional leading backslash makes this idempotent for hand-escaped selectors.
+export function escapeBracketsAndParens(fileSelector: string) {
+	return fileSelector.replace(/\\?([()[\]])/g, '\\$1');
 }

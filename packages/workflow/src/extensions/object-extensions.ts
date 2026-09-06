@@ -1,5 +1,22 @@
+// NOTE: This file is intentionally mirrored in @n8n/expression-runtime/src/extensions/
+// for use inside the isolated VM. Changes here must be reflected there and vice versa.
+// TODO: Eliminate the duplication. The blocker is that @n8n/expression-runtime is
+// Vite-stubbed for browser builds (to exclude isolated-vm), which prevents n8n-workflow
+// from importing these extension utilities directly from the runtime package. Fix by
+// splitting @n8n/expression-runtime into a browser-safe extensions subpath (not stubbed)
+// and a node-only VM entry (stubbed).
 import type { ExtensionMap } from './extensions';
 import { ExpressionExtensionError } from '../errors/expression-extension.error';
+
+// Define an own data field rather than assigning through an inherited setter.
+function defineField(target: Record<string, unknown>, key: PropertyKey, value: unknown): void {
+	Object.defineProperty(target, key, {
+		value,
+		writable: true,
+		enumerable: true,
+		configurable: true,
+	});
+}
 
 function isEmpty(value: object): boolean {
 	return Object.keys(value).length === 0;
@@ -66,21 +83,17 @@ function keepFieldsContaining(value: object, extraArgs: string[]): object {
 }
 
 export function compact(value: object): object {
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	const newObj: any = {};
-	for (const [key, val] of Object.entries(value)) {
+	const newObj: Record<string, unknown> = {};
+	for (const [key, val] of Object.entries(value) as Array<[string, unknown]>) {
 		if (val !== null && val !== undefined && val !== 'nil' && val !== '') {
 			if (typeof val === 'object') {
-				if (Object.keys(val as object).length === 0) continue;
-				// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-argument
-				newObj[key] = compact(val);
+				if (Object.keys(val).length === 0) continue;
+				defineField(newObj, key, compact(val));
 			} else {
-				// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-member-access
-				newObj[key] = val;
+				defineField(newObj, key, val);
 			}
 		}
 	}
-	// eslint-disable-next-line @typescript-eslint/no-unsafe-return
 	return newObj;
 }
 
@@ -179,6 +192,7 @@ hasField.doc = {
 
 removeField.doc = {
 	name: 'removeField',
+	aliases: ['delete'],
 	description: "Removes a field from the Object. The same as JavaScript's <code>delete</code>.",
 	examples: [
 		{

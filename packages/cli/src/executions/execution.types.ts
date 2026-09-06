@@ -1,10 +1,5 @@
 import type { AuthenticatedRequest, ExecutionSummaries, ExecutionEntity } from '@n8n/db';
-import type {
-	AnnotationVote,
-	ExecutionStatus,
-	IDataObject,
-	WorkflowExecuteMode,
-} from 'n8n-workflow';
+import type { AnnotationVote, ExecutionStatus, WorkflowExecuteMode } from 'n8n-workflow';
 
 export declare namespace ExecutionRequest {
 	namespace QueryParams {
@@ -17,10 +12,8 @@ export declare namespace ExecutionRequest {
 	}
 
 	namespace BodyParams {
-		type DeleteFilter = {
-			deleteBefore?: Date;
-			filters?: IDataObject;
-			ids?: string[];
+		type StopMany = {
+			filter: ExecutionSummaries.StopExecutionFilterQuery; // stringified `FilterFields`
 		};
 	}
 
@@ -41,11 +34,12 @@ export declare namespace ExecutionRequest {
 
 	type GetOne = AuthenticatedRequest<RouteParams.ExecutionId>;
 
-	type Delete = AuthenticatedRequest<{}, {}, BodyParams.DeleteFilter>;
+	type GetVersions = AuthenticatedRequest<{ workflowId: string }>;
 
 	type Retry = AuthenticatedRequest<RouteParams.ExecutionId, {}, { loadWorkflow?: boolean }, {}>;
 
 	type Stop = AuthenticatedRequest<RouteParams.ExecutionId>;
+	type StopMany = AuthenticatedRequest<{}, {}, BodyParams.StopMany>;
 
 	type Update = AuthenticatedRequest<RouteParams.ExecutionId, {}, ExecutionUpdatePayload, {}>;
 }
